@@ -3,6 +3,9 @@ import json
 import re
 import httpx
 from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
 from flask import Flask, request, Response
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
@@ -17,6 +20,8 @@ CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
 TWILIO_SID   = os.environ.get('TWILIO_SID')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN')
 TWILIO_FROM  = 'whatsapp:+14155238886'
+EDINSON_WA   = 'whatsapp:+51955428896'
+LIMA_TZ      = pytz.timezone('America/Lima')
  
 # Firebase — la clave se pega en Railway como variable FIREBASE_JSON
 firebase_json = os.environ.get('FIREBASE_JSON', '{}')
@@ -256,6 +261,182 @@ _tiempo = rapida/corta/media/larga_
  
 Ejemplo:
 `nueva: Revisar SCTR | imp:5 urg:5 dif:1 tiempo:rapida`"""
+ 
+# ── ENVÍO PROACTIVO ──────────────────────────────────────
+def send_to_edinson(msg):
+    try:
+        twilio_client.messages.create(
+            from_=TWILIO_FROM,
+            to=EDINSON_WA,
+            body=msg
+        )
+        print(f"Mensaje enviado: {msg[:50]}...")
+    except Exception as e:
+        print(f"Error enviando mensaje: {e}")
+ 
+# ── RECORDATORIOS AUTOMÁTICOS ─────────────────────────────
+ 
+def reminder_manana():
+    """7:30 AM Lima — Resumen matutino del día"""
+    tasks = get_tasks()
+    hoy = datetime.now(LIMA_TZ).date().isoformat()
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    hoy_tasks  = sorted([t for t in pendientes if t.get('fecha') == hoy],
+                        key=lambda x: -get_priority_score(x))
+    vencidas   = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
+ 
+    msg = f"☀️ *Buenos días Edinson!*\n"
+    msg += f"_{datetime.now(LIMA_TZ).strftime('%A %d de %B')}_\n\n"
+ 
+    if vencidas:
+        msg += f"⚠️ *{len(vencidas)} tareas vencidas pendientes*\n"
+        for t in sorted(vencidas, key=lambda x: -days_overdue(x.get('fecha','')))[:3]:
+            dias = days_overdue(t.get('fecha',''))
+            msg += f"  🔴 {t.get('titulo')} ({dias}d retraso)\n"
+        msg += "\n"
+ 
+    if hoy_tasks:
+        msg += f"📅 *{len(hoy_tasks)} tareas para hoy:*\n"
+        for t in hoy_tasks[:5]:
+            msg += f"  • {t.get('titulo')} — {get_priority_label(t)}\n"
+    else:
+        msg += "✅ No tienes tareas programadas para hoy\n"
+ 
+    # Quick wins del día
+    qw = [t for t in pendientes if t.get('tiempo') in ['rapida','corta'] and t.get('dificultad',5) <= 2]
+    if qw:
+        msg += f"\n⚡ *{len(qw)} Quick Win{'s' if len(qw)>1 else ''} disponible{'s' if len(qw)>1 else ''}*\n"
+        for t in qw[:2]:
+            msg += f"  • {t.get('titulo')}\n"
+ 
+    msg += f"\n📊 Total pendientes: {len(pendientes)}"
+    msg += "\n\n_Responde *hoy*, *pendientes* o escríbeme lo que necesites agendar_ 💪"
+    send_to_edinson(msg)
+ 
+def reminder_nocturno():
+    """9:00 PM Lima — Resumen nocturno y planificación mañana"""
+    tasks = get_tasks()
+    hoy = datetime.now(LIMA_TZ).date().isoformat()
+    manana = (datetime.now(LIMA_TZ).date() + timedelta(days=1)).isoformat()
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    completadas_hoy = [t for t in tasks if t.get('estado') == 'completada' and t.get('completadoEl') == hoy]
+    manana_tasks = sorted([t for t in pendientes if t.get('fecha') == manana],
+                          key=lambda x: -get_priority_score(x))
+    vencidas = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
+ 
+    msg = f"🌙 *Resumen nocturno — {datetime.now(LIMA_TZ).strftime('%d/%m/%Y')}*\n\n"
+ 
+    if completadas_hoy:
+        msg += f"✅ *Completaste hoy: {len(completadas_hoy)} tarea{'s' if len(completadas_hoy)>1 else ''}*\n"
+        for t in completadas_hoy[:3]:
+            msg += f"  • {t.get('titulo')}\n"
+        msg += "\n"
+ 
+    if vencidas:
+        msg += f"⚠️ *{len(vencidas)} vencida{'s' if len(vencidas)>1 else ''} sin cerrar*\n"
+        for t in sorted(vencidas, key=lambda x: -get_priority_score(x))[:3]:
+            msg += f"  🔴 {t.get('titulo')}\n"
+        msg += "\n"
+ 
+    if manana_tasks:
+        msg += f"📅 *Mañana tienes {len(manana_tasks)} tarea{'s' if len(manana_tasks)>1 else ''}:*\n"
+        for t in manana_tasks[:4]:
+            msg += f"  • {t.get('titulo')} — {get_priority_label(t)}\n"
+    else:
+        msg += "📅 No tienes tareas programadas para mañana\n"
+ 
+    msg += f"\n📊 Pendientes totales: {len(pendientes)}"
+    msg += "\n\n_Descansa bien_ 🌟"
+    send_to_edinson(msg)
+ 
+def reminder_seguimiento():
+    """2:00 PM Lima — Seguimiento de tareas delegadas y en curso"""
+    tasks = get_tasks()
+    hoy = datetime.now(LIMA_TZ).date().isoformat()
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    hoy_tasks = sorted([t for t in pendientes if t.get('fecha') == hoy],
+                       key=lambda x: -get_priority_score(x))
+    vencidas = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
+ 
+    completadas_hoy = [t for t in tasks if t.get('estado') == 'completada' and t.get('completadoEl') == hoy]
+    total_hoy = len(hoy_tasks) + len(completadas_hoy)
+    avance = f"{len(completadas_hoy)}/{total_hoy}" if total_hoy > 0 else "0/0"
+ 
+    msg = f"📋 *Seguimiento de tarde — {datetime.now(LIMA_TZ).strftime('%d/%m/%Y')}*\n"
+    msg += f"_Son las 2:00 PM — quedan 3h 45min para la salida_\n\n"
+    msg += f"Avance del día: *{avance} tareas* completadas\n\n"
+ 
+    if hoy_tasks:
+        msg += f"🔵 *Pendientes de hoy:*\n"
+        for t in hoy_tasks[:4]:
+            msg += f"  • {t.get('titulo')} ⚡{get_priority_score(t)}pts\n"
+        msg += "\n"
+ 
+    if vencidas:
+        msg += f"⚠️ *{len(vencidas)} vencida{'s' if len(vencidas)>1 else ''} — resolver hoy:*\n"
+        for t in sorted(vencidas, key=lambda x: -get_priority_score(x))[:3]:
+            dias = days_overdue(t.get('fecha',''))
+            msg += f"  🔴 {t.get('titulo')} ({dias}d)\n"
+ 
+    msg += "\n_¿Qué vas a cerrar antes de salir?_ 💪"
+    send_to_edinson(msg)
+ 
+def reminder_vencimientos():
+    """Se ejecuta cada mañana — alerta 7 y 3 días hábiles antes del vencimiento"""
+    tasks = get_tasks()
+    hoy = datetime.now(LIMA_TZ).date()
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente' and t.get('fecha')]
+ 
+    alertas_7 = []
+    alertas_3 = []
+ 
+    for t in pendientes:
+        try:
+            fecha = datetime.strptime(t['fecha'], '%Y-%m-%d').date()
+            # Calcular días hábiles restantes (lunes-viernes)
+            dias_habiles = 0
+            current = hoy
+            while current < fecha:
+                current += timedelta(days=1)
+                if current.weekday() < 5:  # lunes=0 a viernes=4
+                    dias_habiles += 1
+            if dias_habiles == 7:
+                alertas_7.append(t)
+            elif dias_habiles == 3:
+                alertas_3.append(t)
+        except:
+            pass
+ 
+    if alertas_7:
+        msg = f"📅 *Alerta — 7 días hábiles*\n"
+        msg += f"Las siguientes tareas vencen en exactamente 7 días hábiles:\n\n"
+        for t in alertas_7:
+            msg += f"  🟡 *{t.get('titulo')}*\n"
+            msg += f"     Vence: {fmt_date(t.get('fecha'))} | {get_priority_label(t)}\n"
+        msg += "\n_Planifica con anticipación_ ⏰"
+        send_to_edinson(msg)
+ 
+    if alertas_3:
+        msg = f"🔔 *Alerta — 3 días hábiles*\n"
+        msg += f"¡Atención! Estas tareas vencen en 3 días hábiles:\n\n"
+        for t in alertas_3:
+            msg += f"  🟠 *{t.get('titulo')}*\n"
+            msg += f"     Vence: {fmt_date(t.get('fecha'))} | {get_priority_label(t)}\n"
+        msg += "\n_Es momento de priorizar_ ⚠️"
+        send_to_edinson(msg)
+ 
+# ── INICIAR SCHEDULER ─────────────────────────────────────
+scheduler = BackgroundScheduler(timezone=LIMA_TZ)
+# 7:30 AM Lima — Buenos días + resumen matutino
+scheduler.add_job(reminder_manana,     CronTrigger(hour=7,  minute=30, timezone=LIMA_TZ))
+# 9:00 PM Lima — Resumen nocturno
+scheduler.add_job(reminder_nocturno,   CronTrigger(hour=21, minute=0,  timezone=LIMA_TZ))
+# 2:00 PM Lima — Seguimiento de tarde
+scheduler.add_job(reminder_seguimiento,CronTrigger(hour=14, minute=0,  timezone=LIMA_TZ))
+# 7:35 AM Lima — Alertas de vencimiento 7 y 3 días hábiles
+scheduler.add_job(reminder_vencimientos,CronTrigger(hour=7, minute=35, timezone=LIMA_TZ))
+scheduler.start()
+print("Scheduler iniciado — recordatorios activos para Lima (UTC-5)")
  
 # ── PROCESADOR DE LENGUAJE NATURAL CON CLAUDE ────────────
 def procesar_con_claude(mensaje, tasks):
