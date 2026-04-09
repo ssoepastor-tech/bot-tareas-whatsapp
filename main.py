@@ -11,9 +11,9 @@ from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import firebase_admin
 from firebase_admin import credentials, firestore
-
+ 
 app = Flask(__name__)
-
+ 
 # ── CONFIGURACIÓN ─────────────────────────────────────────
 # Las claves se configuran en Railway como variables de entorno
 CLAUDE_API_KEY = os.environ.get('CLAUDE_API_KEY')
@@ -23,20 +23,20 @@ TWILIO_FROM  = 'whatsapp:+14155238886'
 EDINSON_WA   = 'whatsapp:+51955428896'
 pending_tasks = {}  # guarda tareas esperando confirmación de fecha
 LIMA_TZ      = pytz.timezone('America/Lima')
-
+ 
 # Firebase — la clave se pega en Railway como variable FIREBASE_JSON
 firebase_json = os.environ.get('FIREBASE_JSON', '{}')
 cred = credentials.Certificate(json.loads(firebase_json))
 firebase_admin.initialize_app(cred)
 db = firestore.client()
-
+ 
 twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
-
+ 
 # ── HELPERS ───────────────────────────────────────────────
 def get_tasks():
     docs = db.collection('tareas').stream()
     return [{'id': d.id, **d.to_dict()} for d in docs]
-
+ 
 def get_priority_label(t):
     u = t.get('urgencia', 3)
     i = t.get('importancia', 3)
@@ -44,7 +44,7 @@ def get_priority_label(t):
     if u >= 4 or i >= 4:  return 'Alta'
     if u >= 2 or i >= 2:  return 'Media'
     return 'Baja'
-
+ 
 def get_priority_score(t):
     imp = (t.get('importancia', 3) / 5) * 0.35
     urg = (t.get('urgencia', 3)    / 5) * 0.35
@@ -52,7 +52,7 @@ def get_priority_score(t):
     tiempo_map = {'rapida': 10, 'corta': 7, 'media': 4, 'larga': 1}
     efi = (tiempo_map.get(t.get('tiempo', 'media'), 4) / 10) * 0.15
     return round((imp + urg + fac + efi) * 10, 1)
-
+ 
 def is_overdue(fecha_str):
     if not fecha_str: return False
     try:
@@ -60,7 +60,7 @@ def is_overdue(fecha_str):
         return fecha.date() < datetime.now().date()
     except:
         return False
-
+ 
 def days_overdue(fecha_str):
     if not fecha_str: return 0
     try:
@@ -69,7 +69,7 @@ def days_overdue(fecha_str):
         return diff.days if diff.days > 0 else 0
     except:
         return 0
-
+ 
 def fmt_date(fecha_str):
     if not fecha_str: return 'Sin fecha'
     try:
@@ -77,7 +77,7 @@ def fmt_date(fecha_str):
         return d.strftime('%d/%m/%Y')
     except:
         return fecha_str
-
+ 
 # ── COMANDOS ─────────────────────────────────────────────
 def cmd_hoy(tasks):
     hoy = datetime.now().date().isoformat()
@@ -104,7 +104,7 @@ def cmd_hoy(tasks):
     total_pend = len(pendientes)
     msg += f"\n📊 Total pendientes: {total_pend}"
     return msg
-
+ 
 def cmd_pendientes(tasks):
     pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
     if not pendientes:
@@ -123,7 +123,7 @@ def cmd_pendientes(tasks):
         msg += f"    {get_priority_label(t)} | ⚡{get_priority_score(t)}pts{fecha}{retraso}\n\n"
     
     return msg.strip()
-
+ 
 def cmd_quickwins(tasks):
     qw = [t for t in tasks 
           if t.get('estado') == 'pendiente'
@@ -140,7 +140,7 @@ def cmd_quickwins(tasks):
     
     msg += "\n_Cierra estas primero para ganar momentum_ 💪"
     return msg
-
+ 
 def cmd_nueva_tarea(texto, numero_wa):
     """
     Formato: nueva: [titulo] | imp:[1-5] urg:[1-5] dif:[1-5] fecha:[DD/MM] tiempo:[rapida/corta/media/larga]
@@ -211,7 +211,7 @@ def cmd_nueva_tarea(texto, numero_wa):
             f"Tiempo: {tiempo_txt}\n"
             f"Fecha: {fecha_txt}\n"
             f"Prioridad: ⚡{score} pts")
-
+ 
 def cmd_completar(texto, tasks):
     # Buscar por número o por texto
     pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
@@ -229,7 +229,7 @@ def cmd_completar(texto, tasks):
             return f"✅ *Completada:* {t.get('titulo')}\n\n¡Excelente trabajo! 🎯"
     
     return "❌ Indica el número. Ejemplo: *completar 2*\nUsa *pendientes* para ver la lista numerada."
-
+ 
 def cmd_vencidas(tasks):
     pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
     vencidas   = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
@@ -244,25 +244,25 @@ def cmd_vencidas(tasks):
         msg += f"    Vencida hace {dias} día{'s' if dias!=1 else ''} ({fmt_date(t.get('fecha'))})\n\n"
     
     return msg.strip()
-
+ 
 def cmd_ayuda():
     return """🤖 *Comandos disponibles:*
-
+ 
 📋 *hoy* — Resumen del día
 📋 *pendientes* — Lista de tareas pendientes
 ⚡ *quickwin* — Tareas rápidas y fáciles
 ⚠️ *vencidas* — Tareas atrasadas
 ✅ *completar N* — Marcar tarea N como completada
-
+ 
 ➕ *Crear tarea:*
 `nueva: [título] | imp:5 urg:4 dif:1 tiempo:rapida fecha:10/04`
-
+ 
 _imp/urg/dif = del 1 al 5_
 _tiempo = rapida/corta/media/larga_
-
+ 
 Ejemplo:
 `nueva: Revisar SCTR | imp:5 urg:5 dif:1 tiempo:rapida`"""
-
+ 
 # ── ENVÍO PROACTIVO ──────────────────────────────────────
 def send_to_edinson(msg):
     try:
@@ -274,9 +274,9 @@ def send_to_edinson(msg):
         print(f"Mensaje enviado: {msg[:50]}...")
     except Exception as e:
         print(f"Error enviando mensaje: {e}")
-
+ 
 # ── RECORDATORIOS AUTOMÁTICOS ─────────────────────────────
-
+ 
 def reminder_manana():
     """7:30 AM Lima — Resumen matutino del día"""
     tasks = get_tasks()
@@ -285,35 +285,35 @@ def reminder_manana():
     hoy_tasks  = sorted([t for t in pendientes if t.get('fecha') == hoy],
                         key=lambda x: -get_priority_score(x))
     vencidas   = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
-
+ 
     msg = f"☀️ *Buenos días Edinson!*\n"
     msg += f"_{datetime.now(LIMA_TZ).strftime('%A %d de %B')}_\n\n"
-
+ 
     if vencidas:
         msg += f"⚠️ *{len(vencidas)} tareas vencidas pendientes*\n"
         for t in sorted(vencidas, key=lambda x: -days_overdue(x.get('fecha','')))[:3]:
             dias = days_overdue(t.get('fecha',''))
             msg += f"  🔴 {t.get('titulo')} ({dias}d retraso)\n"
         msg += "\n"
-
+ 
     if hoy_tasks:
         msg += f"📅 *{len(hoy_tasks)} tareas para hoy:*\n"
         for t in hoy_tasks[:5]:
             msg += f"  • {t.get('titulo')} — {get_priority_label(t)}\n"
     else:
         msg += "✅ No tienes tareas programadas para hoy\n"
-
+ 
     # Quick wins del día
     qw = [t for t in pendientes if t.get('tiempo') in ['rapida','corta'] and t.get('dificultad',5) <= 2]
     if qw:
         msg += f"\n⚡ *{len(qw)} Quick Win{'s' if len(qw)>1 else ''} disponible{'s' if len(qw)>1 else ''}*\n"
         for t in qw[:2]:
             msg += f"  • {t.get('titulo')}\n"
-
+ 
     msg += f"\n📊 Total pendientes: {len(pendientes)}"
     msg += "\n\n_Responde *hoy*, *pendientes* o escríbeme lo que necesites agendar_ 💪"
     send_to_edinson(msg)
-
+ 
 def reminder_nocturno():
     """9:00 PM Lima — Resumen nocturno y planificación mañana"""
     tasks = get_tasks()
@@ -324,32 +324,32 @@ def reminder_nocturno():
     manana_tasks = sorted([t for t in pendientes if t.get('fecha') == manana],
                           key=lambda x: -get_priority_score(x))
     vencidas = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
-
+ 
     msg = f"🌙 *Resumen nocturno — {datetime.now(LIMA_TZ).strftime('%d/%m/%Y')}*\n\n"
-
+ 
     if completadas_hoy:
         msg += f"✅ *Completaste hoy: {len(completadas_hoy)} tarea{'s' if len(completadas_hoy)>1 else ''}*\n"
         for t in completadas_hoy[:3]:
             msg += f"  • {t.get('titulo')}\n"
         msg += "\n"
-
+ 
     if vencidas:
         msg += f"⚠️ *{len(vencidas)} vencida{'s' if len(vencidas)>1 else ''} sin cerrar*\n"
         for t in sorted(vencidas, key=lambda x: -get_priority_score(x))[:3]:
             msg += f"  🔴 {t.get('titulo')}\n"
         msg += "\n"
-
+ 
     if manana_tasks:
         msg += f"📅 *Mañana tienes {len(manana_tasks)} tarea{'s' if len(manana_tasks)>1 else ''}:*\n"
         for t in manana_tasks[:4]:
             msg += f"  • {t.get('titulo')} — {get_priority_label(t)}\n"
     else:
         msg += "📅 No tienes tareas programadas para mañana\n"
-
+ 
     msg += f"\n📊 Pendientes totales: {len(pendientes)}"
     msg += "\n\n_Descansa bien_ 🌟"
     send_to_edinson(msg)
-
+ 
 def reminder_seguimiento():
     """2:00 PM Lima — Seguimiento de tareas delegadas y en curso"""
     tasks = get_tasks()
@@ -358,39 +358,39 @@ def reminder_seguimiento():
     hoy_tasks = sorted([t for t in pendientes if t.get('fecha') == hoy],
                        key=lambda x: -get_priority_score(x))
     vencidas = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
-
+ 
     completadas_hoy = [t for t in tasks if t.get('estado') == 'completada' and t.get('completadoEl') == hoy]
     total_hoy = len(hoy_tasks) + len(completadas_hoy)
     avance = f"{len(completadas_hoy)}/{total_hoy}" if total_hoy > 0 else "0/0"
-
+ 
     msg = f"📋 *Seguimiento de tarde — {datetime.now(LIMA_TZ).strftime('%d/%m/%Y')}*\n"
     msg += f"_Son las 2:00 PM — quedan 3h 45min para la salida_\n\n"
     msg += f"Avance del día: *{avance} tareas* completadas\n\n"
-
+ 
     if hoy_tasks:
         msg += f"🔵 *Pendientes de hoy:*\n"
         for t in hoy_tasks[:4]:
             msg += f"  • {t.get('titulo')} ⚡{get_priority_score(t)}pts\n"
         msg += "\n"
-
+ 
     if vencidas:
         msg += f"⚠️ *{len(vencidas)} vencida{'s' if len(vencidas)>1 else ''} — resolver hoy:*\n"
         for t in sorted(vencidas, key=lambda x: -get_priority_score(x))[:3]:
             dias = days_overdue(t.get('fecha',''))
             msg += f"  🔴 {t.get('titulo')} ({dias}d)\n"
-
+ 
     msg += "\n_¿Qué vas a cerrar antes de salir?_ 💪"
     send_to_edinson(msg)
-
+ 
 def reminder_vencimientos():
     """Se ejecuta cada mañana — alerta 7 y 3 días hábiles antes del vencimiento"""
     tasks = get_tasks()
     hoy = datetime.now(LIMA_TZ).date()
     pendientes = [t for t in tasks if t.get('estado') == 'pendiente' and t.get('fecha')]
-
+ 
     alertas_7 = []
     alertas_3 = []
-
+ 
     for t in pendientes:
         try:
             fecha = datetime.strptime(t['fecha'], '%Y-%m-%d').date()
@@ -407,7 +407,7 @@ def reminder_vencimientos():
                 alertas_3.append(t)
         except:
             pass
-
+ 
     if alertas_7:
         msg = f"📅 *Alerta — 7 días hábiles*\n"
         msg += f"Las siguientes tareas vencen en exactamente 7 días hábiles:\n\n"
@@ -416,7 +416,7 @@ def reminder_vencimientos():
             msg += f"     Vence: {fmt_date(t.get('fecha'))} | {get_priority_label(t)}\n"
         msg += "\n_Planifica con anticipación_ ⏰"
         send_to_edinson(msg)
-
+ 
     if alertas_3:
         msg = f"🔔 *Alerta — 3 días hábiles*\n"
         msg += f"¡Atención! Estas tareas vencen en 3 días hábiles:\n\n"
@@ -425,7 +425,7 @@ def reminder_vencimientos():
             msg += f"     Vence: {fmt_date(t.get('fecha'))} | {get_priority_label(t)}\n"
         msg += "\n_Es momento de priorizar_ ⚠️"
         send_to_edinson(msg)
-
+ 
 # ── MENSAJES MOTIVADORES CON CLAUDE ─────────────────────
 def generar_motivacion(tipo):
     hoy = datetime.now(LIMA_TZ)
@@ -435,7 +435,7 @@ def generar_motivacion(tipo):
                        and t.get('completadoEl') == hoy.date().isoformat()]
     vencidas = [t for t in pendientes if is_overdue(t.get('fecha',''))]
     hoy_tasks = [t for t in pendientes if t.get('fecha') == hoy.date().isoformat()]
-
+ 
     contextos = {
         'afirmacion': (
             f"Genera una afirmacion poderosa de exito, abundancia y prosperidad para Edinson Pastor, "
@@ -465,12 +465,12 @@ def generar_motivacion(tipo):
             f"Que sienta que cada tarea cerrada es un logro profesional. Maximo 3 lineas."
         )
     }
-
+ 
     prompt = (
-        f"Eres Eddy, asistente de Edinson Pastor. {contextos[tipo]} "
+        f"Eres el asistente personal de Edinson Pastor. {contextos[tipo]} "
         f"Responde SOLO el mensaje, sin explicaciones, sin JSON, en espanol natural."
     )
-
+ 
     try:
         response = httpx.post(
             "https://api.anthropic.com/v1/messages",
@@ -491,27 +491,27 @@ def generar_motivacion(tipo):
     except Exception as e:
         print(f"Error motivacion: {e}")
         return None
-
+ 
 def motivacion_afirmacion():
     msg = generar_motivacion('afirmacion')
     if msg:
         send_to_edinson(f"🌟 *Buenos dias, Edinson*\n\n{msg}")
-
+ 
 def motivacion_arranque():
     msg = generar_motivacion('arranque')
     if msg:
         send_to_edinson(f"🚀 *A trabajar*\n\n{msg}")
-
+ 
 def motivacion_mediodia():
     msg = generar_motivacion('mediodia')
     if msg:
         send_to_edinson(f"⚡ *Mitad del dia*\n\n{msg}")
-
+ 
 def motivacion_cierre():
     msg = generar_motivacion('cierre')
     if msg:
         send_to_edinson(f"🎯 *Ultimas horas*\n\n{msg}")
-
+ 
 # ── INICIAR SCHEDULER ─────────────────────────────────────
 scheduler = BackgroundScheduler(timezone=LIMA_TZ)
 # 7:30 AM Lima — Buenos días + resumen matutino
@@ -529,14 +529,14 @@ scheduler.add_job(motivacion_mediodia,    CronTrigger(hour=12, minute=30, timezo
 scheduler.add_job(motivacion_cierre,      CronTrigger(hour=15, minute=0,  timezone=LIMA_TZ))
 scheduler.start()
 print("Scheduler iniciado — recordatorios activos para Lima (UTC-5)")
-
+ 
 # ── PROCESADOR CON CLAUDE FLUIDO ─────────────────────────
 def procesar_con_claude(mensaje, tasks):
     hoy = datetime.now(LIMA_TZ)
     pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
     vencidas   = [t for t in pendientes if is_overdue(t.get('fecha',''))]
     top5 = sorted(pendientes, key=lambda x: -get_priority_score(x))[:5]
-
+ 
     resumen = ""
     for i, t in enumerate(top5, 1):
         over = is_overdue(t.get('fecha',''))
@@ -545,13 +545,13 @@ def procesar_con_claude(mensaje, tasks):
         if t.get('fecha'): resumen += f" | {fmt_date(t.get('fecha'))}"
         if over: resumen += f" | {dias}d retraso"
         resumen += "\n"
-
+ 
     manana = (hoy + timedelta(days=1)).strftime('%Y-%m-%d')
-
+ 
     prompt = (
-        f"Eres Eddy, asistente personal de Edinson Pastor, profesional SSOMA en Electro Enchufe SAC Lima Peru.\n"
+        f"Eres un asistente personal de Edinson Pastor, profesional SSOMA en Electro Enchufe SAC Lima Peru.\n"
         f"Eres cercano, directo y profesional. Conoces bien el trabajo SSOMA: EPPs, SCTR, IPERC, inspecciones, actas, charlas, EMO.\n"
-        f"Tuteas a Edinson. Eres conciso pero calido. Nunca eres robotico.\n\n"
+        f"Llamas siempre a tu usuario Edinson, nunca Eddy ni otro apodo. Eres conciso pero calido. Nunca eres robotico.\n\n"
         f"HOY: {hoy.strftime('%A %d de %B de %Y, %H:%M')} Lima Peru\n"
         f"Jornada: 7:30 AM - 5:45 PM | Almuerzo: 12:00-2:00 PM\n"
         f"Pendientes: {len(pendientes)} | Vencidas: {len(vencidas)}\n"
@@ -574,7 +574,7 @@ def procesar_con_claude(mensaje, tasks):
         f"Tiempo: <15min=rapida, 15-45min=corta, 1-2h=media, >2h=larga\n"
         f"SSOMA keywords -> categoria:trabajo, importancia>=4"
     )
-
+ 
     try:
         response = httpx.post(
             "https://api.anthropic.com/v1/messages",
@@ -598,7 +598,7 @@ def procesar_con_claude(mensaje, tasks):
     except Exception as e:
         print(f"Error Claude: {e}")
         return None
-
+ 
 # ── WEBHOOK PRINCIPAL ─────────────────────────────────────
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -612,10 +612,10 @@ def webhook():
     if sender in pending_tasks:
         data = pending_tasks[sender]
         hoy = datetime.now(LIMA_TZ).date()
-
+ 
         fecha_resuelta = None
         inc_lower = incoming.strip().lower()
-
+ 
         if inc_lower in ['hoy', 'today']:
             fecha_resuelta = hoy.isoformat()
         elif inc_lower in ['mañana', 'manana', 'tomorrow']:
@@ -661,7 +661,7 @@ def webhook():
                             fecha_resuelta = date(year, mes_num, int(mm.group(1))).isoformat()
                         except: pass
                         break
-
+ 
         if fecha_resuelta is not None:
             data['fecha'] = fecha_resuelta
             del pending_tasks[sender]
@@ -688,17 +688,21 @@ def webhook():
             resp = MessagingResponse()
             resp.message(reply)
             return Response(str(resp), mimetype='application/xml')
-
-    # Comandos directos rápidos (sin gastar API)
-    if any(x in incoming for x in ['hoy', 'resumen', 'buenos días', 'buenos dias']):
+ 
+    # Comandos directos rápidos (solo si el mensaje es corto y exacto)
+    # Mensajes largos (más de 5 palabras) siempre van a Claude para no perder tareas
+    palabras = incoming.strip().split()
+    es_mensaje_largo = len(palabras) > 4
+ 
+    if not es_mensaje_largo and incoming in ['hoy', 'resumen', 'qué hay hoy', 'que hay hoy']:
         reply = cmd_hoy(tasks)
-    elif incoming in ['pendientes', 'lista', 'tareas']:
+    elif not es_mensaje_largo and incoming in ['pendientes', 'lista', 'tareas', 'mis tareas']:
         reply = cmd_pendientes(tasks)
-    elif incoming in ['quickwin', 'quick win', 'quickwins']:
+    elif not es_mensaje_largo and incoming in ['quickwin', 'quick win', 'quickwins']:
         reply = cmd_quickwins(tasks)
-    elif incoming in ['vencidas', 'atrasadas']:
+    elif not es_mensaje_largo and incoming in ['vencidas', 'atrasadas']:
         reply = cmd_vencidas(tasks)
-    elif incoming in ['ayuda', 'help', 'comandos', 'hola', 'menu']:
+    elif not es_mensaje_largo and incoming in ['ayuda', 'help', 'comandos', 'menu']:
         reply = cmd_ayuda()
     elif re.match(r'^completar\s+\d+$', incoming):
         reply = cmd_completar(incoming, tasks)
@@ -764,11 +768,11 @@ def webhook():
     resp = MessagingResponse()
     resp.message(reply)
     return Response(str(resp), mimetype='application/xml')
-
+ 
 @app.route('/health', methods=['GET'])
 def health():
     return {'status': 'ok', 'bot': 'Gestor Tareas Edinson'}, 200
-
+ 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
