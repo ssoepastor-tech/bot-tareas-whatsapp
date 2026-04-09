@@ -1,0 +1,293 @@
+import os
+import json
+import re
+from datetime import datetime, timedelta
+from flask import Flask, request, Response
+from twilio.rest import Client
+from twilio.twiml.messaging_response import MessagingResponse
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+app = Flask(__name__)
+
+# ── CONFIGURACIÓN ─────────────────────────────────────────
+# Las claves se configuran en Railway como variables de entorno
+TWILIO_SID   = os.environ.get('TWILIO_SID')
+TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN')
+TWILIO_FROM  = 'whatsapp:+14155238886'
+
+# Firebase — la clave se pega en Railway como variable FIREBASE_JSON
+firebase_json = os.environ.get('FIREBASE_JSON', '{}')
+cred = credentials.Certificate(json.loads(firebase_json))
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+twilio_client = Client(TWILIO_SID, TWILIO_TOKEN)
+
+# ── HELPERS ───────────────────────────────────────────────
+def get_tasks():
+    docs = db.collection('tareas').stream()
+    return [{'id': d.id, **d.to_dict()} for d in docs]
+
+def get_priority_label(t):
+    u = t.get('urgencia', 3)
+    i = t.get('importancia', 3)
+    if u >= 4 and i >= 4: return 'URGENTE'
+    if u >= 4 or i >= 4:  return 'Alta'
+    if u >= 2 or i >= 2:  return 'Media'
+    return 'Baja'
+
+def get_priority_score(t):
+    imp = (t.get('importancia', 3) / 5) * 0.35
+    urg = (t.get('urgencia', 3)    / 5) * 0.35
+    fac = ((6 - t.get('dificultad', 3)) / 5) * 0.15
+    tiempo_map = {'rapida': 10, 'corta': 7, 'media': 4, 'larga': 1}
+    efi = (tiempo_map.get(t.get('tiempo', 'media'), 4) / 10) * 0.15
+    return round((imp + urg + fac + efi) * 10, 1)
+
+def is_overdue(fecha_str):
+    if not fecha_str: return False
+    try:
+        fecha = datetime.strptime(fecha_str, '%Y-%m-%d')
+        return fecha.date() < datetime.now().date()
+    except:
+        return False
+
+def days_overdue(fecha_str):
+    if not fecha_str: return 0
+    try:
+        fecha = datetime.strptime(fecha_str, '%Y-%m-%d')
+        diff = datetime.now().date() - fecha.date()
+        return diff.days if diff.days > 0 else 0
+    except:
+        return 0
+
+def fmt_date(fecha_str):
+    if not fecha_str: return 'Sin fecha'
+    try:
+        d = datetime.strptime(fecha_str, '%Y-%m-%d')
+        return d.strftime('%d/%m/%Y')
+    except:
+        return fecha_str
+
+# ── COMANDOS ─────────────────────────────────────────────
+def cmd_hoy(tasks):
+    hoy = datetime.now().date().isoformat()
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    hoy_tasks  = [t for t in pendientes if t.get('fecha') == hoy]
+    vencidas   = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
+    
+    msg = f"📋 *Resumen de hoy — {datetime.now().strftime('%d/%m/%Y')}*\n\n"
+    
+    if vencidas:
+        msg += f"⚠️ *{len(vencidas)} VENCIDAS:*\n"
+        for t in sorted(vencidas, key=lambda x: -get_priority_score(x))[:3]:
+            dias = days_overdue(t.get('fecha'))
+            msg += f"  • {t.get('titulo')} ({dias}d retraso)\n"
+        msg += "\n"
+    
+    if hoy_tasks:
+        msg += f"📅 *{len(hoy_tasks)} para hoy:*\n"
+        for t in sorted(hoy_tasks, key=lambda x: -get_priority_score(x))[:5]:
+            msg += f"  • {t.get('titulo')} — {get_priority_label(t)}\n"
+    elif not vencidas:
+        msg += "✅ No tienes tareas para hoy\n"
+    
+    total_pend = len(pendientes)
+    msg += f"\n📊 Total pendientes: {total_pend}"
+    return msg
+
+def cmd_pendientes(tasks):
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    if not pendientes:
+        return "✅ No tienes tareas pendientes. ¡Todo al día!"
+    
+    sorted_tasks = sorted(pendientes, key=lambda x: -get_priority_score(x))[:8]
+    msg = f"📋 *Top tareas pendientes ({len(pendientes)} total):*\n\n"
+    
+    for i, t in enumerate(sorted_tasks, 1):
+        over = is_overdue(t.get('fecha', ''))
+        dias = days_overdue(t.get('fecha', ''))
+        estado_icon = "⚠️" if over else "🔵"
+        retraso = f" ({dias}d retraso)" if over else ""
+        fecha = f" | {fmt_date(t.get('fecha'))}" if t.get('fecha') else ""
+        msg += f"{estado_icon} *{i}.* {t.get('titulo')}\n"
+        msg += f"    {get_priority_label(t)} | ⚡{get_priority_score(t)}pts{fecha}{retraso}\n\n"
+    
+    return msg.strip()
+
+def cmd_quickwins(tasks):
+    qw = [t for t in tasks 
+          if t.get('estado') == 'pendiente'
+          and t.get('tiempo') in ['rapida', 'corta']
+          and t.get('dificultad', 5) <= 2]
+    
+    if not qw:
+        return "⚡ No tienes Quick Wins disponibles ahora.\n\nAgrega tareas rápidas y fáciles para verlas aquí."
+    
+    msg = f"⚡ *Quick Wins — {len(qw)} tareas rápidas:*\n\n"
+    for t in sorted(qw, key=lambda x: -get_priority_score(x)):
+        tiempo_txt = '< 15min' if t.get('tiempo') == 'rapida' else '15-45min'
+        msg += f"• {t.get('titulo')} ({tiempo_txt})\n"
+    
+    msg += "\n_Cierra estas primero para ganar momentum_ 💪"
+    return msg
+
+def cmd_nueva_tarea(texto, numero_wa):
+    """
+    Formato: nueva: [titulo] | imp:[1-5] urg:[1-5] dif:[1-5] fecha:[DD/MM] tiempo:[rapida/corta/media/larga]
+    Ejemplo: nueva: Revisar SCTR | imp:5 urg:5 dif:1 fecha:10/04 tiempo:rapida
+    """
+    texto = texto.replace('nueva:', '').replace('nueva tarea:', '').strip()
+    
+    # Extraer título (antes del |)
+    partes = texto.split('|')
+    titulo = partes[0].strip()
+    if not titulo:
+        return "❌ Falta el título. Ejemplo:\n*nueva: Revisar SCTR | imp:5 urg:4 dif:1 tiempo:rapida*"
+    
+    # Valores por defecto
+    data = {
+        'titulo':      titulo,
+        'descripcion': '',
+        'importancia': 3,
+        'urgencia':    3,
+        'dificultad':  3,
+        'tiempo':      'media',
+        'categoria':   'trabajo',
+        'estado':      'pendiente',
+        'fecha':       '',
+        'creadoEl':    datetime.now().date().isoformat(),
+        'completadoEl': '',
+        'origen':      'whatsapp'
+    }
+    
+    if len(partes) > 1:
+        params = partes[1].strip()
+        
+        m = re.search(r'imp:(\d)', params)
+        if m: data['importancia'] = min(5, max(1, int(m.group(1))))
+        
+        m = re.search(r'urg:(\d)', params)
+        if m: data['urgencia'] = min(5, max(1, int(m.group(1))))
+        
+        m = re.search(r'dif:(\d)', params)
+        if m: data['dificultad'] = min(5, max(1, int(m.group(1))))
+        
+        m = re.search(r'tiempo:(rapida|corta|media|larga)', params)
+        if m: data['tiempo'] = m.group(1)
+        
+        m = re.search(r'fecha:(\d{1,2})[\/\-](\d{1,2})', params)
+        if m:
+            day, month = int(m.group(1)), int(m.group(2))
+            year = datetime.now().year
+            if month < datetime.now().month:
+                year += 1
+            try:
+                data['fecha'] = f"{year}-{month:02d}-{day:02d}"
+            except:
+                pass
+    
+    # Guardar en Firebase
+    db.collection('tareas').add(data)
+    
+    score = get_priority_score(data)
+    tiempo_txt = {'rapida':'< 15min','corta':'15-45min','media':'1-2h','larga':'> 2h'}.get(data['tiempo'],'')
+    fecha_txt = fmt_date(data['fecha']) if data['fecha'] else 'Sin fecha'
+    
+    return (f"✅ *Tarea creada desde WhatsApp*\n\n"
+            f"📌 *{titulo}*\n"
+            f"Importancia: {'⭐'*data['importancia']}\n"
+            f"Urgencia: {'🔴'*data['urgencia']}\n"
+            f"Dificultad: {'💪'*data['dificultad']}\n"
+            f"Tiempo: {tiempo_txt}\n"
+            f"Fecha: {fecha_txt}\n"
+            f"Prioridad: ⚡{score} pts")
+
+def cmd_completar(texto, tasks):
+    # Buscar por número o por texto
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    
+    m = re.search(r'completar\s+(\d+)', texto)
+    if m:
+        idx = int(m.group(1)) - 1
+        sorted_tasks = sorted(pendientes, key=lambda x: -get_priority_score(x))
+        if 0 <= idx < len(sorted_tasks):
+            t = sorted_tasks[idx]
+            db.collection('tareas').document(t['id']).update({
+                'estado': 'completada',
+                'completadoEl': datetime.now().date().isoformat()
+            })
+            return f"✅ *Completada:* {t.get('titulo')}\n\n¡Excelente trabajo! 🎯"
+    
+    return "❌ Indica el número. Ejemplo: *completar 2*\nUsa *pendientes* para ver la lista numerada."
+
+def cmd_vencidas(tasks):
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    vencidas   = [t for t in pendientes if is_overdue(t.get('fecha', ''))]
+    
+    if not vencidas:
+        return "✅ No tienes tareas vencidas. ¡Todo al día!"
+    
+    msg = f"⚠️ *{len(vencidas)} tareas vencidas:*\n\n"
+    for t in sorted(vencidas, key=lambda x: -days_overdue(x.get('fecha', ''))):
+        dias = days_overdue(t.get('fecha', ''))
+        msg += f"🔴 *{t.get('titulo')}*\n"
+        msg += f"    Vencida hace {dias} día{'s' if dias!=1 else ''} ({fmt_date(t.get('fecha'))})\n\n"
+    
+    return msg.strip()
+
+def cmd_ayuda():
+    return """🤖 *Comandos disponibles:*
+
+📋 *hoy* — Resumen del día
+📋 *pendientes* — Lista de tareas pendientes
+⚡ *quickwin* — Tareas rápidas y fáciles
+⚠️ *vencidas* — Tareas atrasadas
+✅ *completar N* — Marcar tarea N como completada
+
+➕ *Crear tarea:*
+`nueva: [título] | imp:5 urg:4 dif:1 tiempo:rapida fecha:10/04`
+
+_imp/urg/dif = del 1 al 5_
+_tiempo = rapida/corta/media/larga_
+
+Ejemplo:
+`nueva: Revisar SCTR | imp:5 urg:5 dif:1 tiempo:rapida`"""
+
+# ── WEBHOOK PRINCIPAL ─────────────────────────────────────
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    incoming = request.form.get('Body', '').strip().lower()
+    sender   = request.form.get('From', '')
+    
+    tasks = get_tasks()
+    
+    if any(x in incoming for x in ['hoy', 'resumen', 'buenos días', 'buenos dias']):
+        reply = cmd_hoy(tasks)
+    elif any(x in incoming for x in ['pendiente', 'lista', 'tareas']):
+        reply = cmd_pendientes(tasks)
+    elif any(x in incoming for x in ['quickwin', 'quick win', 'rapida', 'rápida']):
+        reply = cmd_quickwins(tasks)
+    elif any(x in incoming for x in ['vencida', 'atrasada', 'retraso']):
+        reply = cmd_vencidas(tasks)
+    elif incoming.startswith('nueva') or incoming.startswith('agregar'):
+        reply = cmd_nueva_tarea(request.form.get('Body', '').strip(), sender)
+    elif 'completar' in incoming or 'complete' in incoming:
+        reply = cmd_completar(incoming, tasks)
+    elif any(x in incoming for x in ['ayuda', 'help', 'comandos', 'hola']):
+        reply = cmd_ayuda()
+    else:
+        reply = cmd_ayuda()
+    
+    resp = MessagingResponse()
+    resp.message(reply)
+    return Response(str(resp), mimetype='application/xml')
+
+@app.route('/health', methods=['GET'])
+def health():
+    return {'status': 'ok', 'bot': 'Gestor Tareas Edinson'}, 200
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
