@@ -21,6 +21,7 @@ TWILIO_SID   = os.environ.get('TWILIO_SID')
 TWILIO_TOKEN = os.environ.get('TWILIO_TOKEN')
 TWILIO_FROM  = 'whatsapp:+14155238886'
 EDINSON_WA   = 'whatsapp:+51955428896'
+pending_tasks = {}  # guarda tareas esperando confirmación de fecha
 LIMA_TZ      = pytz.timezone('America/Lima')
  
 # Firebase — la clave se pega en Railway como variable FIREBASE_JSON
@@ -425,6 +426,92 @@ def reminder_vencimientos():
         msg += "\n_Es momento de priorizar_ ⚠️"
         send_to_edinson(msg)
  
+# ── MENSAJES MOTIVADORES CON CLAUDE ─────────────────────
+def generar_motivacion(tipo):
+    hoy = datetime.now(LIMA_TZ)
+    tasks = get_tasks()
+    pendientes = [t for t in tasks if t.get('estado') == 'pendiente']
+    completadas_hoy = [t for t in tasks if t.get('estado') == 'completada'
+                       and t.get('completadoEl') == hoy.date().isoformat()]
+    vencidas = [t for t in pendientes if is_overdue(t.get('fecha',''))]
+    hoy_tasks = [t for t in pendientes if t.get('fecha') == hoy.date().isoformat()]
+ 
+    contextos = {
+        'afirmacion': (
+            f"Genera una afirmacion poderosa de exito, abundancia y prosperidad para Edinson Pastor, "
+            f"profesional SSOMA en Lima Peru. Hoy es {hoy.strftime('%A %d de %B')}. "
+            f"El mensaje debe ser personal, energizante y orientado a mentalidad de exito financiero "
+            f"y profesional. Maximo 4 lineas. Usa un tono inspirador pero realista. "
+            f"Incluye una afirmacion en primera persona. Sin emojis excesivos, maximo 2."
+        ),
+        'arranque': (
+            f"Genera un mensaje motivador de arranque matutino para Edinson Pastor, profesional SSOMA. "
+            f"Tiene {len(hoy_tasks)} tareas hoy, {len(vencidas)} vencidas, {len(pendientes)} pendientes total. "
+            f"El mensaje debe empujarlo a ser productivo, evitar procrastinar y enfocarse en cerrar tareas. "
+            f"Hazlo personal y directo. Maximo 3 lineas. Menciona algo concreto de su dia si aplica."
+        ),
+        'mediodia': (
+            f"Genera un mensaje motivador de medio dia para Edinson. "
+            f"Completo {len(completadas_hoy)} tareas esta manana. Tiene {len(hoy_tasks)} pendientes para hoy. "
+            f"{'Tiene '+str(len(vencidas))+' tareas vencidas.' if vencidas else 'Sin tareas vencidas.'} "
+            f"El mensaje debe hacer un balance honesto de la manana y motivarlo para la tarde. "
+            f"Directo, sin palabreria. Maximo 3 lineas."
+        ),
+        'cierre': (
+            f"Genera un mensaje motivador de cierre de tarde para Edinson. "
+            f"Son las 3 PM, quedan 2h45 para la salida (5:45 PM). "
+            f"Completo {len(completadas_hoy)} tareas hoy. Tiene {len(hoy_tasks)} pendientes. "
+            f"El mensaje debe crear urgencia positiva para cerrar pendientes antes de salir. "
+            f"Que sienta que cada tarea cerrada es un logro profesional. Maximo 3 lineas."
+        )
+    }
+ 
+    prompt = (
+        f"Eres Eddy, asistente de Edinson Pastor. {contextos[tipo]} "
+        f"Responde SOLO el mensaje, sin explicaciones, sin JSON, en espanol natural."
+    )
+ 
+    try:
+        response = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": CLAUDE_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-haiku-4-5",
+                "max_tokens": 200,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=12.0
+        )
+        result = response.json()
+        return result['content'][0]['text'].strip()
+    except Exception as e:
+        print(f"Error motivacion: {e}")
+        return None
+ 
+def motivacion_afirmacion():
+    msg = generar_motivacion('afirmacion')
+    if msg:
+        send_to_edinson(f"🌟 *Buenos dias, Edinson*\n\n{msg}")
+ 
+def motivacion_arranque():
+    msg = generar_motivacion('arranque')
+    if msg:
+        send_to_edinson(f"🚀 *A trabajar*\n\n{msg}")
+ 
+def motivacion_mediodia():
+    msg = generar_motivacion('mediodia')
+    if msg:
+        send_to_edinson(f"⚡ *Mitad del dia*\n\n{msg}")
+ 
+def motivacion_cierre():
+    msg = generar_motivacion('cierre')
+    if msg:
+        send_to_edinson(f"🎯 *Ultimas horas*\n\n{msg}")
+ 
 # ── INICIAR SCHEDULER ─────────────────────────────────────
 scheduler = BackgroundScheduler(timezone=LIMA_TZ)
 # 7:30 AM Lima — Buenos días + resumen matutino
@@ -434,7 +521,12 @@ scheduler.add_job(reminder_nocturno,   CronTrigger(hour=21, minute=0,  timezone=
 # 2:00 PM Lima — Seguimiento de tarde
 scheduler.add_job(reminder_seguimiento,CronTrigger(hour=14, minute=0,  timezone=LIMA_TZ))
 # 7:35 AM Lima — Alertas de vencimiento 7 y 3 días hábiles
-scheduler.add_job(reminder_vencimientos,CronTrigger(hour=7, minute=35, timezone=LIMA_TZ))
+scheduler.add_job(reminder_vencimientos,  CronTrigger(hour=7,  minute=35, timezone=LIMA_TZ))
+# Mensajes motivadores diarios
+scheduler.add_job(motivacion_afirmacion,  CronTrigger(hour=8,  minute=0,  timezone=LIMA_TZ))
+scheduler.add_job(motivacion_arranque,    CronTrigger(hour=9,  minute=0,  timezone=LIMA_TZ))
+scheduler.add_job(motivacion_mediodia,    CronTrigger(hour=12, minute=30, timezone=LIMA_TZ))
+scheduler.add_job(motivacion_cierre,      CronTrigger(hour=15, minute=0,  timezone=LIMA_TZ))
 scheduler.start()
 print("Scheduler iniciado — recordatorios activos para Lima (UTC-5)")
  
@@ -520,6 +612,87 @@ def webhook():
     tasks = get_tasks()
     body_original = request.form.get('Body', '').strip()
     
+    # ── Respuesta de fecha pendiente ──────────────────────────
+    if sender in pending_tasks:
+        data = pending_tasks[sender]
+        hoy = datetime.now(LIMA_TZ).date()
+ 
+        fecha_resuelta = None
+        inc_lower = incoming.strip().lower()
+ 
+        if inc_lower in ['hoy', 'today']:
+            fecha_resuelta = hoy.isoformat()
+        elif inc_lower in ['mañana', 'manana', 'tomorrow']:
+            fecha_resuelta = (hoy + timedelta(days=1)).isoformat()
+        elif inc_lower in ['sin fecha', 'no tiene', 'sin', 'ninguna', 'no']:
+            fecha_resuelta = ''
+        elif inc_lower in ['lunes','monday']:
+            d = hoy + timedelta(days=(0 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        elif inc_lower in ['martes','tuesday']:
+            d = hoy + timedelta(days=(1 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        elif inc_lower in ['miércoles','miercoles','wednesday']:
+            d = hoy + timedelta(days=(2 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        elif inc_lower in ['jueves','thursday']:
+            d = hoy + timedelta(days=(3 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        elif inc_lower in ['viernes','friday']:
+            d = hoy + timedelta(days=(4 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        else:
+            # Intentar parsear DD/MM o DD de mes
+            m = re.search(r'(\d{1,2})[/\-](\d{1,2})', inc_lower)
+            if m:
+                day, month = int(m.group(1)), int(m.group(2))
+                year = hoy.year
+                if month < hoy.month: year += 1
+                try:
+                    from datetime import date
+                    fecha_resuelta = date(year, month, day).isoformat()
+                except: pass
+            else:
+                meses = {'enero':1,'febrero':2,'marzo':3,'abril':4,'mayo':5,'junio':6,
+                         'julio':7,'agosto':8,'septiembre':9,'octubre':10,'noviembre':11,'diciembre':12}
+                for mes_nom, mes_num in meses.items():
+                    mm = re.search(rf'(\d{{1,2}})\s+de\s+{mes_nom}', inc_lower)
+                    if mm:
+                        try:
+                            from datetime import date
+                            year = hoy.year
+                            if mes_num < hoy.month: year += 1
+                            fecha_resuelta = date(year, mes_num, int(mm.group(1))).isoformat()
+                        except: pass
+                        break
+ 
+        if fecha_resuelta is not None:
+            data['fecha'] = fecha_resuelta
+            del pending_tasks[sender]
+            db.collection('tareas').add(data)
+            score = get_priority_score(data)
+            tiempo_txt = {'rapida':'< 15min','corta':'15-45min','media':'1-2h','larga':'> 2h'}.get(data['tiempo'],'')
+            imp_stars = '⭐' * data['importancia']
+            urg_dots = '🔴' * data['urgencia']
+            fecha_txt = fmt_date(data['fecha']) if data['fecha'] else 'Sin fecha'
+            reply = (f"✅ *Tarea agendada*\n\n"
+                    f"📌 *{data['titulo']}*\n"
+                    f"Importancia: {imp_stars}\n"
+                    f"Urgencia: {urg_dots}\n"
+                    f"Tiempo: {tiempo_txt}\n"
+                    f"Fecha: {fecha_txt}\n"
+                    f"Categoría: {data['categoria']}\n"
+                    f"Prioridad: ⚡{score} pts")
+            resp = MessagingResponse()
+            resp.message(reply)
+            return Response(str(resp), mimetype='application/xml')
+        else:
+            reply = ("No entendí la fecha. Intente con:\n"
+                    "*hoy*, *mañana*, *viernes*, *15/04* o *sin fecha*")
+            resp = MessagingResponse()
+            resp.message(reply)
+            return Response(str(resp), mimetype='application/xml')
+ 
     # Comandos directos rápidos (sin gastar API)
     if any(x in incoming for x in ['hoy', 'resumen', 'buenos días', 'buenos dias']):
         reply = cmd_hoy(tasks)
@@ -542,7 +715,6 @@ def webhook():
         if interpretacion is None:
             reply = cmd_ayuda()
         elif interpretacion['accion'] == 'crear':
-            # Construir tarea desde interpretación
             data = {
                 'titulo':      interpretacion.get('titulo', body_original[:50]),
                 'descripcion': '',
@@ -557,20 +729,27 @@ def webhook():
                 'completadoEl': '',
                 'origen':      'whatsapp-nlp'
             }
-            db.collection('tareas').add(data)
-            score = get_priority_score(data)
-            tiempo_txt = {'rapida':'< 15min','corta':'15-45min','media':'1-2h','larga':'> 2h'}.get(data['tiempo'],'')
-            fecha_txt = fmt_date(data['fecha']) if data['fecha'] else 'Sin fecha'
-            imp_stars = '⭐' * data['importancia']
-            urg_dots = '🔴' * data['urgencia']
-            reply = (f"✅ *Tarea agendada*\n\n"
-                    f"📌 *{data['titulo']}*\n"
-                    f"Importancia: {imp_stars}\n"
-                    f"Urgencia: {urg_dots}\n"
-                    f"Tiempo: {tiempo_txt}\n"
-                    f"Fecha: {fecha_txt}\n"
-                    f"Categoría: {data['categoria']}\n"
-                    f"Prioridad: ⚡{score} pts")
+            respuesta_fluida = interpretacion.get('respuesta_fluida', '')
+            if not data['fecha']:
+                pending_tasks[sender] = data
+                reply = (f"📌 *{data['titulo']}*\n\n"
+                        f"Para que fecha la agendamos?\n\n"
+                        f"• *hoy* / *manana*\n"
+                        f"• *lunes*, *martes*, *viernes*...\n"
+                        f"• Fecha exacta: *15/04*\n"
+                        f"• *sin fecha* si no aplica")
+            else:
+                db.collection('tareas').add(data)
+                score = get_priority_score(data)
+                if respuesta_fluida:
+                    fecha_txt = fmt_date(data['fecha']) if data['fecha'] else 'sin fecha'
+                    reply = f"✅ {respuesta_fluida}\n_Prioridad: {score}pts | {fecha_txt}_"
+                else:
+                    tiempo_txt = {'rapida':'< 15min','corta':'15-45min','media':'1-2h','larga':'> 2h'}.get(data['tiempo'],'')
+                    reply = (f"✅ Listo, agendado.\n\n"
+                            f"📌 *{data['titulo']}*\n"
+                            f"Fecha: {fmt_date(data['fecha'])} | Prioridad: {score}pts\n"
+                            f"Tiempo: {tiempo_txt}")
         elif interpretacion['accion'] == 'consultar':
             tipo = interpretacion.get('tipo', 'hoy')
             if tipo == 'hoy': reply = cmd_hoy(tasks)
@@ -581,6 +760,8 @@ def webhook():
         elif interpretacion['accion'] == 'completar':
             num = interpretacion.get('numero', 0)
             reply = cmd_completar(f'completar {num}', tasks)
+        elif interpretacion.get('accion') == 'conversar':
+            reply = interpretacion.get('respuesta_fluida', '¿En que te puedo ayudar?')
         else:
             reply = cmd_ayuda()
     
