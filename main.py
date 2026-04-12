@@ -37,6 +37,79 @@ def get_tasks():
     docs = db.collection('tareas').stream()
     return [{'id': d.id, **d.to_dict()} for d in docs]
  
+def get_recurrentes():
+    docs = db.collection('tareas_recurrentes').stream()
+    return [{'id': d.id, **d.to_dict()} for d in docs]
+ 
+def calcular_proxima_fecha(recurrencia, referencia=None):
+    """Calcula la próxima fecha según la recurrencia"""
+    hoy = referencia or datetime.now(LIMA_TZ).date()
+    tipo = recurrencia.get('tipo')
+    
+    if tipo == 'diaria':
+        return (hoy + timedelta(days=1)).isoformat()
+    
+    elif tipo == 'semanal':
+        dia = recurrencia.get('dia_semana', 0)  # 0=lunes
+        dias = (dia - hoy.weekday()) % 7 or 7
+        return (hoy + timedelta(days=dias)).isoformat()
+    
+    elif tipo == 'mensual':
+        # X días hábiles antes del cierre del mes
+        dias_habiles_antes = recurrencia.get('dias_habiles_antes', 2)
+        # Calcular último día del mes siguiente
+        if hoy.month == 12:
+            primer_sig = hoy.replace(year=hoy.year+1, month=1, day=1)
+        else:
+            primer_sig = hoy.replace(month=hoy.month+1, day=1)
+        ultimo_mes = primer_sig - timedelta(days=1)
+        # Restar días hábiles
+        fecha = ultimo_mes
+        habiles = 0
+        while habiles < dias_habiles_antes:
+            fecha -= timedelta(days=1)
+            if fecha.weekday() < 5:
+                habiles += 1
+        return fecha.isoformat()
+    
+    elif tipo == 'quincenal':
+        return (hoy + timedelta(days=15)).isoformat()
+    
+    return None
+ 
+def procesar_recurrentes():
+    """Genera tareas desde las recurrentes si corresponde"""
+    recurrentes = get_recurrentes()
+    hoy = datetime.now(LIMA_TZ).date().isoformat()
+    
+    for r in recurrentes:
+        proxima = r.get('proxima_fecha')
+        if proxima and proxima <= hoy:
+            # Crear la tarea
+            data = {
+                'titulo':      r.get('titulo'),
+                'descripcion': r.get('descripcion', f"Tarea recurrente: {r.get('tipo_label','')}"),
+                'importancia': r.get('importancia', 4),
+                'urgencia':    r.get('urgencia', 4),
+                'dificultad':  r.get('dificultad', 2),
+                'tiempo':      r.get('tiempo', 'corta'),
+                'categoria':   r.get('categoria', 'trabajo'),
+                'fecha':       proxima,
+                'estado':      'pendiente',
+                'creadoEl':    hoy,
+                'completadoEl': '',
+                'origen':      'recurrente'
+            }
+            db.collection('tareas').add(data)
+            
+            # Actualizar próxima fecha
+            nueva_proxima = calcular_proxima_fecha(r, datetime.now(LIMA_TZ).date())
+            db.collection('tareas_recurrentes').document(r['id']).update({
+                'proxima_fecha': nueva_proxima,
+                'ultima_generada': hoy
+            })
+            print(f"Tarea recurrente generada: {r.get('titulo')} -> proxima: {nueva_proxima}")
+ 
 def get_priority_label(t):
     u = t.get('urgencia', 3)
     i = t.get('importancia', 3)
@@ -514,6 +587,8 @@ def motivacion_cierre():
  
 # ── INICIAR SCHEDULER ─────────────────────────────────────
 scheduler = BackgroundScheduler(timezone=LIMA_TZ)
+# 7:00 AM Lima — Generar tareas recurrentes del día
+scheduler.add_job(procesar_recurrentes, CronTrigger(hour=7, minute=0, timezone=LIMA_TZ))
 # 7:30 AM Lima — Buenos días + resumen matutino
 scheduler.add_job(reminder_manana,     CronTrigger(hour=7,  minute=30, timezone=LIMA_TZ))
 # 9:00 PM Lima — Resumen nocturno
@@ -572,7 +647,9 @@ def procesar_con_claude(mensaje, tasks):
         f"Fechas: hoy={hoy.strftime('%Y-%m-%d')}, manana={manana}\n"
         f"Importancia/urgencia: urgente=5, importante=4, normal=3, puede esperar=2, algun dia=1\n"
         f"Tiempo: <15min=rapida, 15-45min=corta, 1-2h=media, >2h=larga\n"
-        f"SSOMA keywords -> categoria:trabajo, importancia>=4"
+        f"SSOMA keywords -> categoria:trabajo, importancia>=4\n"
+        f"Si menciona frecuencia (todos los meses, cada semana, cada lunes, etc) -> accion:recurrente\n"
+        f"Para recurrente: {{\"accion\":\"recurrente\",\"titulo\":\"titulo\",\"tipo\":\"mensual/semanal/diaria/quincenal\",\"dia_semana\":0-6,\"dias_habiles_antes\":N,\"importancia\":1-5,\"urgencia\":1-5,\"dificultad\":1-5,\"tiempo\":\"rapida/corta/media/larga\",\"categoria\":\"trabajo\",\"respuesta_fluida\":\"confirmacion natural\"}}"
     )
  
     try:
@@ -760,6 +837,41 @@ def webhook():
         elif interpretacion['accion'] == 'completar':
             num = interpretacion.get('numero', 0)
             reply = cmd_completar(f'completar {num}', tasks)
+        elif interpretacion.get('accion') == 'recurrente':
+            tipo = interpretacion.get('tipo', 'mensual')
+            titulo = interpretacion.get('titulo', 'Tarea recurrente')
+            tipo_labels = {
+                'mensual': 'cada mes',
+                'semanal': 'cada semana',
+                'diaria':  'cada día',
+                'quincenal': 'cada 15 días'
+            }
+            rec_data = {
+                'titulo':             titulo,
+                'tipo':               tipo,
+                'tipo_label':         tipo_labels.get(tipo, tipo),
+                'dia_semana':         interpretacion.get('dia_semana', 0),
+                'dias_habiles_antes': interpretacion.get('dias_habiles_antes', 2),
+                'importancia':        interpretacion.get('importancia', 4),
+                'urgencia':           interpretacion.get('urgencia', 4),
+                'dificultad':         interpretacion.get('dificultad', 2),
+                'tiempo':             interpretacion.get('tiempo', 'corta'),
+                'categoria':          interpretacion.get('categoria', 'trabajo'),
+                'activa':             True,
+                'creadoEl':           datetime.now(LIMA_TZ).date().isoformat(),
+                'proxima_fecha':      calcular_proxima_fecha(interpretacion)
+            }
+            db.collection('tareas_recurrentes').add(rec_data)
+            fluida = interpretacion.get('respuesta_fluida', '')
+            proxima = fmt_date(rec_data['proxima_fecha']) if rec_data['proxima_fecha'] else 'próximamente'
+            if fluida:
+                reply = f"🔄 {fluida}\n_Primera aparición: {proxima}_"
+            else:
+                reply = (f"🔄 *Tarea recurrente creada*\n\n"
+                        f"📌 *{titulo}*\n"
+                        f"Frecuencia: {tipo_labels.get(tipo, tipo)}\n"
+                        f"Primera aparición: {proxima}\n"
+                        f"Se creará automáticamente cada vez que corresponda")
         elif interpretacion.get('accion') == 'conversar':
             reply = interpretacion.get('respuesta_fluida', '¿En que te puedo ayudar?')
         else:
