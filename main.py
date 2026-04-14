@@ -693,26 +693,47 @@ def webhook():
         fecha_resuelta = None
         inc_lower = incoming.strip().lower()
  
-        if inc_lower in ['hoy', 'today']:
+        # Normalizar y extraer día si viene en frase como "PUSE JUEVES", "es el viernes"
+        inc_norm = inc_lower.strip()
+        inc_norm = inc_norm.replace('á','a').replace('é','e').replace('í','i').replace('ó','o').replace('ú','u')
+        # Extraer solo el día si viene acompañado de otras palabras
+        dias_semana = ['lunes','martes','miercoles','jueves','viernes','sabado','domingo']
+        for dia in dias_semana:
+            if dia in inc_norm and inc_norm != dia:
+                inc_norm = dia  # quedarse solo con el día
+                break
+        # También extraer hoy/mañana si viene en frase
+        if inc_norm != 'hoy' and 'hoy' in inc_norm and len(inc_norm) < 20:
+            inc_norm = 'hoy'
+        if inc_norm not in ['manana','mañana'] and ('manana' in inc_norm or 'mañana' in inc_norm) and len(inc_norm) < 25:
+            inc_norm = 'manana'
+ 
+        if inc_norm in ['hoy', 'today', 'hoy mismo']:
             fecha_resuelta = hoy.isoformat()
-        elif inc_lower in ['mañana', 'manana', 'tomorrow']:
+        elif inc_norm in ['mañana', 'manana', 'tomorrow', 'el dia de mañana']:
             fecha_resuelta = (hoy + timedelta(days=1)).isoformat()
-        elif inc_lower in ['sin fecha', 'no tiene', 'sin', 'ninguna', 'no']:
+        elif inc_norm in ['sin fecha', 'no tiene', 'sin', 'ninguna', 'no', 'sin fecha por ahora']:
             fecha_resuelta = ''
-        elif inc_lower in ['lunes','monday']:
+        elif inc_norm in ['lunes', 'el lunes', 'monday', 'el proximo lunes', 'proximo lunes']:
             d = hoy + timedelta(days=(0 - hoy.weekday()) % 7 or 7)
             fecha_resuelta = d.isoformat()
-        elif inc_lower in ['martes','tuesday']:
+        elif inc_norm in ['martes', 'el martes', 'tuesday', 'el proximo martes', 'proximo martes']:
             d = hoy + timedelta(days=(1 - hoy.weekday()) % 7 or 7)
             fecha_resuelta = d.isoformat()
-        elif inc_lower in ['miércoles','miercoles','wednesday']:
+        elif inc_norm in ['miercoles', 'el miercoles', 'wednesday', 'proximo miercoles']:
             d = hoy + timedelta(days=(2 - hoy.weekday()) % 7 or 7)
             fecha_resuelta = d.isoformat()
-        elif inc_lower in ['jueves','thursday']:
+        elif inc_norm in ['jueves', 'el jueves', 'thursday', 'proximo jueves', 'el proximo jueves']:
             d = hoy + timedelta(days=(3 - hoy.weekday()) % 7 or 7)
             fecha_resuelta = d.isoformat()
-        elif inc_lower in ['viernes','friday']:
+        elif inc_norm in ['viernes', 'el viernes', 'friday', 'proximo viernes', 'el proximo viernes']:
             d = hoy + timedelta(days=(4 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        elif inc_norm in ['sabado', 'el sabado', 'saturday']:
+            d = hoy + timedelta(days=(5 - hoy.weekday()) % 7 or 7)
+            fecha_resuelta = d.isoformat()
+        elif inc_norm in ['domingo', 'el domingo', 'sunday']:
+            d = hoy + timedelta(days=(6 - hoy.weekday()) % 7 or 7)
             fecha_resuelta = d.isoformat()
         else:
             # Intentar parsear DD/MM o DD de mes
@@ -760,8 +781,10 @@ def webhook():
             resp.message(reply)
             return Response(str(resp), mimetype='application/xml')
         else:
-            reply = ("No entendí la fecha. Intente con:\n"
-                    "*hoy*, *mañana*, *viernes*, *15/04* o *sin fecha*")
+            reply = ("No entendí la fecha. Responde solo el día:\n"
+                    "*jueves*, *viernes*, *lunes*\n"
+                    "o una fecha: *15/04*\n"
+                    "o escribe *sin fecha*")
             resp = MessagingResponse()
             resp.message(reply)
             return Response(str(resp), mimetype='application/xml')
